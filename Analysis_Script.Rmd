@@ -1,0 +1,1533 @@
+---
+title: "Analysis Script"
+author: "Nashra Ahmad"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Set up libraries
+
+```{r libraries,warning=FALSE,message=FALSE}
+library(tidyverse)
+library(ggplot2)
+library(stringr)
+library(dplyr)
+library(psycho)
+
+library(ggsignif)
+
+library(lme4)
+library(emmeans)
+library(lmerTest)
+library(robust)
+
+library(tidytext)
+library(ggwordcloud)
+```
+
+## Read data
+
+```{r readdata}
+data1_long<-read.csv('IndianRhythmDiscrimination_DST_Data.csv',skip = 0,header = TRUE)
+data1_long <- data1_long %>% filter(value != "" & !is.na(value)) #deleting empty responses
+
+
+```
+
+## Step 1: Dprime using the pakage
+
+The dprime function (from the psycho() package) has been taken from:
+Makowski, (2018). The psycho Package: an Efficient and
+Publishing-Oriented Workflow for Psychological Science. Journal of Open
+Source Software, 3(22), 470. <https://doi.org/10.21105/joss.00470>
+
+```{r, dprime for Part1}
+# dprime_lab function
+dprime_lab <- function(stim1, stim2, correct, data) {
+  data$CorrectRej <- ifelse(data[[stim1]] != "Ntrl" & data[[stim2]] != "Ntrl" & data[[correct]] == TRUE, 1, NA)
+  data$Miss <- ifelse(data[[stim1]] == "Ntrl" & data[[stim2]] == "Ntrl" & data[[correct]] == FALSE, 1, NA)
+  data$FalseAlarm <- ifelse(data[[stim1]] != "Ntrl" & data[[stim2]] != "Ntrl" & data[[correct]] == FALSE, 1, NA)
+  data$Hit <- ifelse(data[[stim1]] == "Ntrl" & data[[stim2]] == "Ntrl" & data[[correct]] == TRUE, 1, NA)
+  return(data)
+}
+
+# dprime_cat function
+dprime_cat <- function(data, id_col) {
+  result <- data %>%
+    group_by(across(all_of(id_col))) %>%
+    summarize(
+      Hits = sum(!is.na(Hit), na.rm = TRUE),
+      Misses = sum(!is.na(Miss), na.rm = TRUE),
+      FalseAlarms = sum(!is.na(FalseAlarm), na.rm = TRUE),
+      CorrectRejs = sum(!is.na(CorrectRej), na.rm = TRUE),
+      TotalTarg = Hits + Misses,
+      TotalDis = FalseAlarms + CorrectRejs,
+      NumRes = TotalTarg + TotalDis,
+      .groups = "drop"
+    )
+  
+  return(result)
+}
+
+# Adding columns for Stimulus and Response
+data1_long <- data1_long %>%
+  filter(!is.na(value)) %>% 
+  mutate(correct = case_when(
+    Stimuli2 == "Ntrl" & value == "Same" ~ TRUE,
+    (Stimuli2 == "sdmi1" | Stimuli2 == "sdpl1") & value == "Different" ~ TRUE,
+    TRUE ~ FALSE
+  ))
+
+#label each trial 
+data1_long <- dprime_lab("Stimuli2", "Stimuli2", "correct", data = data1_long)
+
+# Data for dprime
+dprime_data <- data1_long %>%
+  group_by(ResponseId, Pattern, Duration, Musicianship_Category, Musical_Training, DST_Score) %>%
+  summarize(
+    Hits = sum(!is.na(Hit), na.rm = TRUE),
+    Misses = sum(!is.na(Miss), na.rm = TRUE),
+    FalseAlarms = sum(!is.na(FalseAlarm), na.rm = TRUE),
+    CorrectRejs = sum(!is.na(CorrectRej), na.rm = TRUE),
+    TotalTarg = Hits + Misses,
+    TotalDis = FalseAlarms + CorrectRejs,
+    NumRes = TotalTarg + TotalDis,
+    .groups = "drop"
+  )
+
+# Calculate d-prime
+dprime_data <- dprime_data %>%
+  rowwise() %>%
+  mutate(
+    dprime_result = list(psycho::dprime(
+      n_hit = Hits,
+      n_fa = FalseAlarms,
+      n_miss = Misses,
+      n_cr = CorrectRejs,
+      adjusted = TRUE  # adjustments for extreme values Hautus (1995)
+    )),
+   
+    dprime = dprime_result$dprime,
+    beta = dprime_result$beta,
+    criterion = dprime_result$c,
+    aprime = dprime_result$aprime
+    # Removed bppd which was added before as it was in the description but removed it as it caused an error.
+  ) %>%
+  ungroup() %>% 
+  select(-dprime_result) 
+
+# Join dprime values back to the original dataset data1_long for future use
+data1_long <- data1_long %>%
+  left_join(
+    dprime_data %>% select(ResponseId, Pattern, Duration, dprime, beta, criterion, aprime),
+    by = c("ResponseId", "Pattern", "Duration") 
+  )
+
+
+dprime_summary <- dprime_data %>%
+  select(ResponseId, Pattern, Duration, Hits, Misses, FalseAlarms, CorrectRejs, 
+         dprime, beta, criterion, aprime) %>%
+  arrange(ResponseId, Pattern, Duration)
+
+# Display dprime results
+print(dprime_summary)
+
+data1_long %>%
+ group_by(Pattern, Duration) %>%
+ summarise(unique_participants = n_distinct(ResponseId)) %>%
+ arrange(Pattern, Duration)
+
+# Count total responses per participant
+data1_long %>% 
+  group_by(ResponseId) %>%
+  summarise(total_responses = n()) %>%
+  arrange(total_responses)
+
+# Count responses per participant by pattern and duration
+data1_long %>%
+  group_by(ResponseId, Pattern, Duration) %>%
+  summarise(responses = n(), .groups = "drop") %>%
+  arrange(ResponseId, Pattern, Duration)
+
+duplicated_rows <- data1_long %>%
+  group_by(ResponseId, Pattern, Duration, value) %>%
+  filter(n() > 1) %>%
+  arrange(ResponseId, Pattern, Duration)
+
+#print(duplicated_rows)
+
+participant_counts <- data1_long %>%
+  group_by(ResponseId) %>%
+  summarise(total_entries = n()) %>%
+  arrange(desc(total_entries))
+
+# View the results
+print(participant_counts)
+
+hist(data1_long$dprime)
+```
+
+Adding heatmap plot to visualise
+
+```{r dprime fig}
+# Create a tile/heatmap style plot
+sdt_counts <- dprime_data %>%
+  group_by(Pattern, Duration) %>%
+  summarise(
+Hit = mean(Hits, na.rm = TRUE),
+Miss = mean(Misses, na.rm = TRUE),
+FA = mean(FalseAlarms, na.rm = TRUE),
+CR = mean(CorrectRejs, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  pivot_longer(
+    cols = c(Hit, Miss, FA, CR),
+    names_to = "Response_Type",
+    values_to = "Count"
+  ) %>%
+  mutate(
+    Response_Type = factor(Response_Type, 
+                          levels = c("Hit", "Miss", "FA", "CR")),
+    # Create position for 2x2 grid
+    x_pos = case_when(
+      Response_Type %in% c("Hit", "Miss") ~ 1,
+      TRUE ~ 2
+    ),
+    y_pos = case_when(
+      Response_Type %in% c("Hit", "FA") ~ 2,
+      TRUE ~ 1
+    )
+  )
+
+# Create the plot with rectangular tiles
+ggplot(sdt_counts, aes(x = x_pos, y = y_pos, fill = Count)) +
+  geom_tile(color = "white", size = 1) +
+  geom_text(aes(label = paste0(Response_Type, "\n", round(Count, 1))), 
+            color = "white", size = 3, fontface = "bold") +
+  facet_grid(Pattern ~ Duration, labeller = label_both) +
+  scale_fill_gradient(low = "lightblue", high = "darkblue") +
+  scale_x_continuous(breaks = NULL) +
+  scale_y_continuous(breaks = NULL) +
+  labs(
+    title = "Signal Detection Results",
+    #subtitle = "Four response types for each Pattern-Duration combination",
+    fill = "Count"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5),
+    axis.title = element_blank(),
+    axis.text = element_blank(),
+    panel.grid = element_blank()
+  ) +
+  coord_fixed()
+```
+
+Small step to do the power test to test number of participants with
+actual data
+
+```{r power}
+data1_long$Duration <- factor(data1_long$Duration)
+dprime_table <- data1_long %>%
+  group_by(Pattern, Duration) %>%
+   summarise(mean_dprime = round(mean(dprime, na.rm = TRUE), 2), .groups = "drop") %>%
+  pivot_wider(names_from = Duration, values_from = mean_dprime)
+
+print(dprime_table)
+
+
+#power analysis: hidden as not required at analysis stage
+
+library(Superpower)
+#design_result <- ANOVA_design(design = "4b*4w",
+  #                            n = 15, 
+  #                            mu = #c(1.50,0.68,0.97,0.78,0.69,1.11,0.73,0.47,0.89,0.90,0.52,0.64,1.45,0.91,1.51,0.47), 
+ #                             sd = 0.57, #as above
+ #                             r = 0.75, 
+ #                             label_list = list("rhythm"  = c("8", "10","7","16"),
+ #                             "Duration" = c( "3.5", "4", "5","8")),
+ #                             plot = TRUE)
+#power_result_vig_1 <- ANOVA_power(design_result, 
+#                                  alpha = 0.05, 
+#                                  nsims = 1000, 
+#                                  seed = 12345,
+#                                  verbose = FALSE)
+#print(knitr::kable(confint(power_result_vig_1, level = .95)))
+```
+
+## Step 2: Analysing Discrimination, through dprime
+
+```{r, Analysis Part 1, Overall}
+
+dprime_data$Duration <- factor(dprime_data$Duration)
+
+
+dprime_data$Pattern <- case_when(
+  dprime_data$Pattern == "Rupak" ~ "7-Rupaktal",
+  dprime_data$Pattern == "Keherva" ~ "8-Keherva", 
+  dprime_data$Pattern == "Jhaptal" ~ "10-Jhaptal",
+  dprime_data$Pattern == "Teental" ~ "16-Teental",
+  TRUE ~ as.character(dprime_data$Pattern)
+)
+
+dprime_data$Pattern <- factor(dprime_data$Pattern, 
+                             levels = c("7-Rupaktal", "8-Keherva", "10-Jhaptal", "16-Teental"))
+
+dprime_data$ResponseId <- factor(dprime_data$ResponseId)
+
+# Basic descriptive statistics
+# Mean dprime scores by Pattern
+pattern_means <- aggregate(dprime ~ Pattern, data = dprime_data, FUN = mean)
+print("Mean d-prime scores by Pattern:")
+print(pattern_means)
+# Mean dprime scores by Duration
+duration_means <- aggregate(dprime ~ Duration, data = dprime_data, FUN = mean)
+print("Mean d-prime scores by Duration:")
+print(duration_means)
+
+
+dprime_model <- lmer(dprime ~ Pattern * Duration + DST_Score + (1|ResponseId), data = dprime_data)
+# Check model summary
+summary(dprime_model)
+
+# ANOVA table for fixed effects
+print("ANOVA table for fixed effects:")
+anova_results <- anova(dprime_model)
+print(anova_results)
+
+# Check if Pattern effect is significant
+if(anova_results["Pattern", "Pr(>F)"] < 0.05) {
+  print("Pattern effect is significant. Post-hoc comparisons:")
+  pattern_emm <- emmeans(dprime_model, ~ Pattern)
+  pattern_pairs <- pairs(pattern_emm, adjust = "tukey")
+  print(pattern_pairs)
+}
+
+# Check if Duration effect is significant
+if(anova_results["Duration", "Pr(>F)"] < 0.05) {
+  print("Duration effect is significant. Post-hoc comparisons:")
+  duration_emm <- emmeans(dprime_model, ~ Duration)
+  duration_pairs <- pairs(duration_emm, adjust = "tukey")
+  print(duration_pairs)
+}
+
+# Check if interaction effect is significant
+if(anova_results["Pattern:Duration", "Pr(>F)"] < 0.09) {
+  print("Interaction effect is ....")
+  print("Examining Duration effects within each Pattern level:")
+  interaction_emm <- emmeans(dprime_model, ~ Duration | Pattern)
+  interaction_pairs <- pairs(interaction_emm, adjust = "tukey")
+  print(interaction_pairs)
+}
+
+# Check if interaction effect is significant
+if(anova_results["Pattern:Duration", "Pr(>F)"] < 0.09) {
+  print("Interaction effect is ...")
+  print("Examining Pattern effects within each Duration level:")
+  interaction_emm <- emmeans(dprime_model, ~ Pattern | Duration)
+  interaction_pairs <- pairs(interaction_emm, adjust = "tukey")
+  print(interaction_pairs)
+}
+
+```
+
+# Visualise dprime scores
+
+These figures are just to visualise the results without added
+significant indicators.
+
+```{r, visualization}
+# Calculate statistics for different groupings in one go
+dprime_stats_full <- dprime_data %>%
+  group_by(Pattern, Duration) %>%
+  summarize(
+    mean_dprime = mean(dprime, na.rm = TRUE),
+    se_dprime = sd(dprime, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  )
+
+dprime_stats_pattern <- dprime_data %>%
+  group_by(Pattern) %>%
+  summarize(
+    mean_dprime = mean(dprime, na.rm = TRUE),
+    se_dprime = sd(dprime, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  )
+
+dprime_stats_duration <- dprime_data %>%
+  group_by(Duration) %>%
+  summarize(
+    mean_dprime = mean(dprime, na.rm = TRUE),
+    se_dprime = sd(dprime, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  )
+
+# Create a color-blind friendly palette
+my_colors <- c("#E69F00", "#56B4E9", "#009E73", "#F0E442")
+my_colors2 <- c("#D55E00", "#0072B2", "#CC79A7", "#999999")
+
+# Set common theme elements
+my_theme <- theme_minimal() +
+  theme(
+    text = element_text(size = 12),
+    axis.title = element_text(face = "bold"),
+    legend.position = "top",
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+    panel.grid.minor = element_blank()
+  )
+
+
+
+# Pattern plot
+p_pattern <- ggplot(dprime_stats_pattern, aes(x = Pattern, y = mean_dprime)) +
+  geom_bar(stat = "identity", width = 0.6, fill = "#3182bd") +
+  geom_errorbar(aes(ymin = mean_dprime - se_dprime, ymax = mean_dprime + se_dprime),
+                width = 0.2, color = "black") +
+  labs(
+    title = "D-prime Scores by Pattern",
+    x = "Pattern",
+    y = "D-prime Score (Mean ± SE)"
+  ) +
+  my_theme +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) # Angled labels for better fit
+
+# Duration plot
+p_duration <- ggplot(dprime_stats_duration, aes(x = Duration, y = mean_dprime)) +
+  geom_bar(stat = "identity", width = 0.6, fill = "#31a354") +
+  geom_errorbar(aes(ymin = mean_dprime - se_dprime, ymax = mean_dprime + se_dprime),
+                width = 0.2, color = "black") +
+  labs(
+    title = "D-prime Scores by Duration",
+    x = "Duration (seconds)",
+    y = "D-prime Score (Mean ± SE)"
+  ) +
+  my_theme
+
+
+# Interaction plot (Pattern × Duration)
+p_interaction1 <- ggplot(dprime_stats_full, aes(x = Pattern, y = mean_dprime, fill = Duration)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8), width = 0.7) +
+  geom_errorbar(aes(ymin = mean_dprime - se_dprime, ymax = mean_dprime + se_dprime),
+                position = position_dodge(width = 0.8), width = 0.2, color = "black") +
+  scale_fill_manual(values = my_colors2) +
+  labs(
+    title = "D-prime Scores by Pattern by each Duration",
+    x = "Pattern",
+    y = "D-prime Score (Mean ± SE)",
+    fill = "Duration"
+  ) +
+  my_theme +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+p_interaction2 <- ggplot(dprime_stats_full, aes(x = Duration, y = mean_dprime, color = Pattern, group = Pattern)) +
+  geom_line(size = 1) +
+  geom_point(size = 3) +
+  #geom_errorbar(aes(ymin = mean_dprime - se_dprime, ymax = mean_dprime + se_dprime),
+  #              width = 0.2) +
+  scale_color_manual(values = my_colors2) +
+  labs(
+    #title = "D-prime Scores by Duration for Each Pattern",
+    x = "Duration",
+    y = "D-prime Score (Mean ± SE)",
+    color = "Pattern"
+  ) +
+  my_theme +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Display plots
+
+#p_pattern
+#p_duration
+#p_interaction1
+#p_interaction2
+
+```
+
+Making final figures by manually adding significant indicators
+
+```{r sig figures}
+# PATTERN PLOT WITH SIGNIFICANCE
+p_pattern <- ggplot(dprime_stats_pattern, aes(x = Pattern, y = mean_dprime)) +
+  geom_bar(stat = "identity", width = 0.6, fill = "#3182bd") +
+  geom_errorbar(aes(ymin = mean_dprime - se_dprime, ymax = mean_dprime + se_dprime),
+                width = 0.2, color = "black") +
+  # 7-Rupaktal vs 8-Keherva (p = 0.0215)
+  annotate("segment", x = 1, xend = 2, y = 1.4, yend = 1.4, color = "black") +
+  annotate("text", x = 1.5, y = 1.45, label = "*", size = 5) +
+  # 7-Rupaktal vs 16-Teental (p = 0.0003)
+  annotate("segment", x = 1, xend = 4, y = 1.6, yend = 1.6, color = "black") +
+  annotate("text", x = 2.5, y = 1.65, label = "***", size = 5) +
+  # 10-Jhaptal vs 16-Teental (p = 0.0055)
+  annotate("segment", x = 3, xend = 4, y = 1.5, yend = 1.5, color = "black") +
+  annotate("text", x = 3.5, y = 1.54, label = "**", size = 5) +
+  labs(
+   # title = "D-prime Scores by Pattern",
+    x = "Pattern",
+    y = "D-prime Score (Mean ± SE)"
+  ) +
+  my_theme +
+   theme(axis.line = element_line(color = "black", size = 0.5)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# DURATION PLOT WITH SIGNIFICANCE
+p_duration <- ggplot(dprime_stats_duration, aes(x = Duration, y = mean_dprime)) +
+  geom_bar(stat = "identity", width = 0.6, fill = "#31a354") +
+  geom_errorbar(aes(ymin = mean_dprime - se_dprime, ymax = mean_dprime + se_dprime),
+                width = 0.2, color = "black") +
+  # Duration3.5 vs Duration8 (positions 1 to 4)
+  annotate("segment", x = 1, xend = 4, y = 1.5, yend = 1.5, color = "black") +
+  annotate("text", x = 2.5, y = 1.53, label = "***", size = 5) +
+  # Duration4 vs Duration8 (positions 2 to 4)
+  annotate("segment", x = 2, xend = 4, y = 1.4, yend = 1.4, color = "black") +
+  annotate("text", x = 3.0, y = 1.43, label = "***", size = 5) +
+  # Duration5 vs Duration8 (positions 3 to 4)
+  annotate("segment", x = 3, xend = 4, y = 1.3, yend = 1.3, color = "black") +
+  annotate("text", x = 3.5, y = 1.33, label = "***", size = 5) +
+  labs(
+   # title = "D-prime Scores by Duration",
+    x = "Duration (seconds)",
+    y = "D-prime Score (Mean ± SE)"
+  ) +
+  my_theme+
+   theme(axis.line = element_line(color = "black", size = 0.5))
+
+# INTERACTION PLOT WITH SIGNIFICANCE
+p_interaction <- ggplot(dprime_stats_full, aes(x = Pattern, y = mean_dprime, fill = Duration)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8), width = 0.7) +
+  geom_errorbar(aes(ymin = mean_dprime - se_dprime, ymax = mean_dprime + se_dprime),
+                position = position_dodge(width = 0.8), width = 0.2, color = "black") +
+  scale_fill_manual(values = my_colors2) +
+  labs(
+    #title = "D-prime Scores by Pattern × Duration Interaction",
+    x = "Pattern",
+    y = "D-prime Score (Mean ± SE)",
+    fill = "Duration"
+  ) +
+  my_theme +
+   theme(axis.line = element_line(color = "black", size = 0.5)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  
+  # Within-pattern duration comparisons (black) - with brackets
+  # 8-Keherva: Duration3.5 vs Duration4
+  annotate("segment", x = 1.7, xend = 1.7, y = 1.75, yend = 1.85, color = "black") +
+  annotate("segment", x = 1.7, xend = 1.9, y = 1.85, yend = 1.85, color = "black") +
+  annotate("segment", x = 1.9, xend = 1.9, y = 1.75, yend = 1.85, color = "black") +
+  annotate("text", x = 1.82, y = 1.86, label = "*", size = 5) +
+  
+  # 8-Keherva: Duration3.5 vs Duration8
+  annotate("segment", x = 1.7, xend = 1.7, y = 1.88, yend = 2, color = "black") +
+  annotate("segment", x = 1.7, xend = 2.3, y = 2, yend = 2, color = "black") +
+  annotate("segment", x = 2.3, xend = 2.3, y = 1.88, yend = 2, color = "black") +
+  annotate("text", x = 2.0, y = 2.01, label = "*", size = 5) +
+  
+  # 10-Jhaptal: Duration4 vs Duration8
+  annotate("segment", x = 2.9, xend = 2.9, y = 1.75, yend = 1.85, color = "black") +
+  annotate("segment", x = 2.9, xend = 3.3, y = 1.85, yend = 1.85, color = "black") +
+  annotate("segment", x = 3.3, xend = 3.3, y = 1.75, yend = 1.85, color = "black") +
+  annotate("text", x = 3.1, y = 1.86, label = "**", size = 5) +
+  
+  # 10-Jhaptal: Duration5 vs Duration8
+  annotate("segment", x = 3.1, xend = 3.1, y = 1.54, yend = 1.65, color = "black") +
+  annotate("segment", x = 3.1, xend = 3.3, y = 1.65, yend = 1.65, color = "black") +
+  annotate("segment", x = 3.3, xend = 3.3, y = 1.54, yend = 1.65, color = "black") +
+  annotate("text", x = 3.2, y = 1.67, label = "*", size = 5) +
+  
+  # 16-Teental: Duration5 vs Duration8
+  annotate("segment", x = 4.1, xend = 4.1, y = 1.62, yend = 1.75, color = "black") +
+  annotate("segment", x = 4.1, xend = 4.3, y = 1.75, yend = 1.75, color = "black") +
+  annotate("segment", x = 4.3, xend = 4.3, y = 1.62, yend = 1.75, color = "black") +
+  annotate("text", x = 4.2, y = 1.77, label = "*", size = 5) +
+  
+  # Within-duration pattern comparisons (red) - with brackets
+  # Duration3.5: 8-Keherva vs 10-Jhaptal
+  annotate("segment", x = 1.7, xend = 1.7, y = 2.1, yend = 2.2, color = "red") +
+  annotate("segment", x = 1.7, xend = 2.7, y = 2.2, yend = 2.2, color = "red") +
+  annotate("segment", x = 2.7, xend = 2.7, y = 2.1, yend = 2.2, color = "red") +
+  annotate("text", x = 2.2, y = 2.2, label = "**", size = 5, color = "red") +
+  
+  # Duration3.5: 10-Jhaptal vs 16-Teental
+  annotate("segment", x = 2.7, xend = 2.7, y = 2.1, yend = 2.2, color = "red") +
+  annotate("segment", x = 2.7, xend = 3.7, y = 2.2, yend = 2.2, color = "red") +
+  annotate("segment", x = 3.7, xend = 3.7, y = 2.1, yend = 2.2, color = "red") +
+  annotate("text", x = 3.2, y = 2.2, label = "*", size = 5, color = "red") +
+  
+  # Duration5: 7-Rupaktal vs 16-Teental
+  annotate("segment", x = 1.1, xend = 1.1, y = 2.3, yend = 2.4, color = "red") +
+  annotate("segment", x = 1.1, xend = 4.1, y = 2.4, yend = 2.4, color = "red") +
+  annotate("segment", x = 4.1, xend = 4.1, y = 2.3, yend = 2.4, color = "red") +
+  annotate("text", x = 2.6, y = 2.4, label = "**", size = 5, color = "red")
+
+# Print plots
+print(p_pattern)
+print(p_duration)
+print(p_interaction)
+
+# Save plots in good quality for viewing
+#ggsave("p_pattern.jpg", plot = p_pattern, dpi = 300, width = 8, height = 6, units = "in")
+#ggsave("p_duration.jpg", plot = p_duration, dpi = 300, width = 8, height = 6, units = "in")
+#ggsave("p_interaction.jpg", plot = p_interaction, dpi = 300, width = 8, height = 6, units = "in")
+
+```
+
+Now, I want to see what happens in 3.5 and 8 seconds only, being the
+shortest and longest. We can also take the average of 3.5 and 4 and call
+it fast and 5 and 8 and call it slow.
+
+Note that this part of the analysis is not added in the paper and is
+exploratory in nature. The below image shows the effect of duration
+again.
+
+```{r slowest vs fastest}
+plot_data <- dprime_data %>%
+  filter(Duration %in% c(3.5, 8))
+
+plot_data$Duration <- factor(plot_data$Duration)
+plot_data$Pattern <- factor(plot_data$Pattern)
+
+summary_data <- plot_data %>%
+  group_by(Pattern, Duration) %>%
+  summarize(
+    mean_dprime = mean(dprime, na.rm = TRUE),
+    se = sd(dprime, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  )
+
+ggplot(summary_data, aes(x = Duration, y = mean_dprime, group = Pattern, color = Pattern, shape = Pattern)) +
+  geom_point(size = 3) +
+  geom_line(linewidth = 1) +
+ # geom_errorbar(aes(ymin = mean_dprime - se, ymax = mean_dprime + se), width = 0.1) +
+  labs(
+    title = "D-prime by Duration across Different Patterns",
+    x = "Duration (seconds)",
+    y = "D-prime"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "top",
+    panel.grid.minor = element_blank(),
+    axis.text = element_text(size = 11),
+    axis.title = element_text(size = 12, face = "bold")
+  ) +
+  scale_y_continuous() +
+  coord_cartesian(ylim = c(min(summary_data$mean_dprime - summary_data$se) * 0.9, 
+                           max(summary_data$mean_dprime + summary_data$se) * 1.1))
+
+
+lmer_model2 <- lmer(dprime ~ Pattern * Duration + (1|ResponseId), data = plot_data)
+lmer_summary2 <- summary(lmer_model2)
+print("Linear Mixed Model Results:")
+print(lmer_summary2)
+anova_lmer2 <- anova(lmer_model2)
+print("ANOVA Table for Linear Mixed Model:")
+print(anova_lmer2)
+
+
+#post-hoc tests
+emm <- emmeans(lmer_model2, ~ Duration| Pattern)
+pairs_result <- pairs(emm)
+print("Post-hoc pairwise comparisons for each pattern:")
+print(pairs_result)
+
+```
+
+## Step 3: Correlations between memory and discrimination
+
+Looking at correlation between Musicianship, Dprime scores and Memory
+Scores.
+
+```{r DST_}
+
+#Overall correlation between Musical Training, mean (dprime), and DST_Score
+
+
+data_dst_overall <- data1_long %>%
+  group_by(ResponseId) %>%
+  summarize(mean_dprime = mean(dprime, na.rm = TRUE),
+    Musical_Training = first(Musical_Training),
+    DST_Score = first(DST_Score)
+  )
+
+# Filter out DST_Score values less than 4
+data_dst_overall <- data_dst_overall %>%
+  filter(DST_Score >= 4)
+
+cor_results <- cor(data_dst_overall %>% select(mean_dprime,Musical_Training, DST_Score), use = "complete.obs")
+
+
+# View the correlation matrix
+print(cor_results)
+cor_test_dst <- cor.test(data_dst_overall$mean_dprime, data_dst_overall$DST_Score)
+print(cor_test_dst)
+
+# Scatter plot of DST_Score vs. mean_dprime with regression line
+ggplot(data_dst_overall, aes(x = DST_Score, y = mean_dprime)) +
+  geom_point(color = "steelblue", size = 2) +
+  geom_smooth(method = "lm", color = "darkred", se = TRUE) +
+  labs(
+    #title = "Relationship Between DST Score and Mean d′",
+    x = "DST Score",
+    y = "Mean d′"
+  ) +
+  theme_minimal(base_size = 14)
+
+```
+
+medium correlation (Cohen, 2013) between mean dprime and dst. No
+correlation between dprime and musical training. No correlation between
+musical training and dst. Cohen, J. (2013). Statistical power analysis
+for the behavioral sciences. routledge.
+
+Exploring the correlations further within Durations and Patterns
+
+```{r correlation pattern and rhythm}
+data_dst <- data1_long %>%
+  select(ResponseId, Musical_Training, Pattern, Duration, dprime, DST_Score) %>%
+  distinct()
+
+#Adding DST to the model
+dprime_model_dst <- lmer(dprime ~ Pattern * Duration + DST_Score + (1|ResponseId), data = data_dst)
+dprime_model <- lmer(dprime ~ Pattern * Duration + (1|ResponseId), data = data_dst)
+summary(dprime_model_dst)
+summary(dprime_model)
+anova(dprime_model,dprime_model_dst)
+anova_results <- anova(dprime_model)
+print(anova_results)
+anova_results_dst <- anova(dprime_model_dst)
+print(anova_results_dst)
+
+# Correlations by Pattern and Duration
+cor_results2 <- data_dst %>%
+  group_by(Pattern, Duration) %>%
+  summarise(
+    cor_DST_dprime = round(cor(DST_Score, dprime, use = "complete.obs"), 4),
+    p_DST_dprime = round(cor.test(DST_Score, dprime)$p.value, 4),
+    cor_DST_MusicalTraining = round(cor(DST_Score, Musical_Training, use = "complete.obs"), 4),
+    p_DST_MusicalTraining = round(cor.test(DST_Score, Musical_Training)$p.value, 4),
+    cor_dprime_MusicalTraining = round(cor(dprime, Musical_Training, use = "complete.obs"), 4),
+    p_dprime_MusicalTraining = round(cor.test(dprime, Musical_Training)$p.value, 4),
+    .groups = "drop"
+  )
+print(cor_results2)
+
+# Pattern and Duration separately
+cor_results_Pattern <- data_dst %>%
+  group_by(Pattern) %>%
+  summarise(
+    cor_DST_dprime = round(cor(DST_Score, dprime, use = "complete.obs"), 4),
+    p_DST_dprime = round(cor.test(DST_Score, dprime)$p.value, 4),
+    cor_DST_MusicalTraining = round(cor(DST_Score, Musical_Training, use = "complete.obs"), 4),
+    p_DST_MusicalTraining = round(cor.test(DST_Score, Musical_Training)$p.value, 4),
+    cor_dprime_MusicalTraining = round(cor(dprime, Musical_Training, use = "complete.obs"), 4),
+    p_dprime_MusicalTraining = round(cor.test(dprime, Musical_Training)$p.value, 4),
+    .groups = "drop"
+  )
+print(cor_results_Pattern)
+
+cor_results_Duration <- data_dst %>%
+  group_by(Duration) %>%
+  summarise(
+    cor_DST_dprime = round(cor(DST_Score, dprime, use = "complete.obs"), 4),
+    p_DST_dprime = round(cor.test(DST_Score, dprime)$p.value, 4),
+    cor_DST_MusicalTraining = round(cor(DST_Score, Musical_Training, use = "complete.obs"), 4),
+    p_DST_MusicalTraining = round(cor.test(DST_Score, Musical_Training)$p.value, 4),
+    cor_dprime_MusicalTraining = round(cor(dprime, Musical_Training, use = "complete.obs"), 4),
+    p_dprime_MusicalTraining = round(cor.test(dprime, Musical_Training)$p.value, 4),
+    .groups = "drop"
+  )
+print(cor_results_Duration)
+
+# Function to assign significance stars
+get_significance_stars <- function(p_value) {
+  if (p_value < 0.001) return("***")
+  else if (p_value < 0.01) return("**")
+  else if (p_value < 0.06) return("*")
+  else if (p_value < 0.1) return("+")
+  else return("")
+}
+
+# Add significance stars to correlation results
+cor_results2 <- cor_results2 %>%
+  mutate(significance_DST_dprime = sapply(p_DST_dprime, get_significance_stars))
+
+# Create labels for the plot - CORRECTED FOR SWAPPED AXES
+cor_results2 <- cor_results2 %>%
+  mutate(
+    label_text = paste0("r = ", cor_DST_dprime, significance_DST_dprime),
+    # Position labels at the top of each facet
+    # DST_Score is now on x-axis (range ~3-9), dprime on y-axis (range ~0-3)
+    x_pos = min(data_dst$DST_Score, na.rm = TRUE) + 0.1 * (max(data_dst$DST_Score, na.rm = TRUE) - min(data_dst$DST_Score, na.rm = TRUE)),
+    y_pos = max(data_dst$dprime, na.rm = TRUE) * 0.95
+  )
+
+#Plots
+ggplot(data_dst, aes(x = Musical_Training, y = dprime, color = Pattern)) +
+  geom_point(alpha = 0.6) + 
+  geom_smooth(method = "lm", se = FALSE) +
+  facet_grid(Pattern ~ Duration) +  # Facet by Pattern and Duration
+  labs(title = "Relationship Between Musical Training and dprime Across Patterns & Durations") +
+  theme_minimal()
+
+ggplot(data_dst, aes(x = Musical_Training, y = DST_Score, color = Pattern)) +
+  geom_point(alpha = 0.6) + 
+  geom_smooth(method = "lm", se = FALSE) +
+  facet_grid(Pattern ~ Duration) +  # Facet by Pattern and Duration
+  labs(title = "Relationship Between Musical Training and DST among Patterns & Durations") +
+  theme_minimal()
+
+# DST vs dprime plot with significance indicators - CORRECTED AXES
+ggplot(data_dst, aes(x = DST_Score, y = dprime, color = Pattern)) +
+  geom_point(alpha = 0.6) + 
+  geom_smooth(method = "lm", se = FALSE) +
+  geom_text(data = cor_results2, 
+            aes(x = x_pos, y = y_pos, label = label_text),
+            color = "black", 
+            size = 3.5, 
+            hjust = 0,
+            inherit.aes = FALSE) +
+  facet_grid(Pattern ~ Duration) +  # Facet by Pattern and Duration
+  labs(title = "Relationship Between DST and dprime Across Patterns & Durations",
+       subtitle = "*** p < 0.001, ** p < 0.01, * p < 0.05, † p < 0.1",
+       x = "DST Score",
+       y = "Mean d'") +
+  theme_minimal()
+
+# Alternative version with significance for Pattern-only correlations
+cor_results_Pattern <- cor_results_Pattern %>%
+  mutate(significance_DST_dprime = sapply(p_DST_dprime, get_significance_stars))
+
+# Create summary plot by Pattern only - CORRECTED AXES
+ggplot(data_dst, aes(x = DST_Score, y = dprime, color = Pattern)) +
+  geom_point(alpha = 0.6) + 
+  geom_smooth(method = "lm", se = FALSE) +
+  facet_wrap(~ Pattern) +
+  labs(title = "Relationship Between DST and dprime by Pattern",
+       subtitle = "*** p < 0.001, ** p < 0.01, * p < 0.05, + p < 0.1",
+       x = "DST Score",
+       y = "Mean d'") +
+  theme_minimal() +
+  # Add correlation and significance text
+  geom_text(data = cor_results_Pattern,
+            aes(x = -Inf, y = Inf, 
+                label = paste0("r = ", cor_DST_dprime, significance_DST_dprime)),
+            hjust = -0.1, vjust = 1.2,
+            color = "black", size = 3.5,
+            inherit.aes = FALSE)
+```
+
+## Step 4: Chunking
+
+In the Experiment: 1= M2 Grouped Version 1, Correct,\
+2= M2 Grouped Version 2, Correct,\
+3= M1 UnGrouped, Correct,\
+4= Extra beat Grouped, Incorrect, 5= Extra Beat Ungrouped, Incorrect.
+'None of these' 'No idea'
+
+Looking at overall data with outliers removed
+
+```{r, Chunking}
+#Overall participant performance on chunks
+
+data1_chunk <- data1_long %>%
+  select(ResponseId, Pattern, Duration, Strategies, RupaktalChunk, KehervaChunk, JhaptalChunk, TeentalChunk, Musical_Training, Musicianship_Category, dprime, DST_Score) %>%
+  mutate(
+    Chunk = case_when(
+      Pattern == "Rupak" ~ RupaktalChunk,
+      Pattern == "Keherva" ~ KehervaChunk,
+      Pattern == "Jhaptal" ~ JhaptalChunk,
+      Pattern == "Teental" ~ TeentalChunk,
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  select(-RupaktalChunk, -KehervaChunk, -JhaptalChunk, -TeentalChunk) 
+
+
+#Count for the display
+data1_chunk_unique <- data1_chunk %>%
+  group_by(ResponseId, Pattern) %>%
+  slice(1) %>%
+  ungroup()
+
+chunk_pattern_counts <- data1_chunk_unique %>%
+  group_by(Pattern, Chunk) %>%
+  summarise(n = n(), .groups = 'drop') %>%
+  arrange(Pattern, Chunk)
+
+print(chunk_pattern_counts)
+
+
+#Removing participants from the data because they selected 'None of These' or 'No idea' for all questions.
+
+invalid_responses <- data1_chunk %>%
+group_by(ResponseId) %>%
+ filter(all(Chunk %in% c("No idea", "None of these"))) %>%
+ distinct(ResponseId) %>%
+  pull(ResponseId)
+
+# Show responses for invalid participants
+invalid_responses_details <- data1_chunk %>%
+  filter(ResponseId %in% invalid_responses) %>%
+  select(ResponseId, Pattern, Chunk)
+print(invalid_responses_details)
+
+data1_chunk <- data1_chunk %>%
+  filter(!ResponseId %in% invalid_responses)
+
+#participants removed.
+
+#Data excluding Duration to look at only Chunking 
+data1_chunk_Pattern <- data1_chunk %>%
+  select(-Duration) %>%  # Remove Duration & chunk columns
+  group_by(ResponseId, Pattern, Strategies, Musical_Training, Musicianship_Category, Chunk, DST_Score) %>% 
+  summarize(dprime = mean(dprime, na.rm = TRUE), .groups = "drop")
+
+#Looking at percentage of chunk response per rhythmic pattern
+chunk_percent <- data1_chunk_Pattern %>%
+  group_by(ResponseId, Pattern, Chunk, Musicianship_Category, Musical_Training, dprime, DST_Score) %>%  
+  summarize(count = n(), .groups = "drop") %>% 
+  group_by(Pattern) %>%
+  mutate(percent_chunk = (count / sum(count)) * 100)
+
+print(sum(chunk_percent$count, na.rm = TRUE)) #to check for errors
+
+
+#Looking at only Chunks and Patterns
+chunk_pattern_table <- table(data1_chunk$Chunk, data1_chunk$Pattern)
+print(chunk_pattern_table) #can provide the table in the paper... Combining categories make more sense.
+
+ggplot(chunk_percent, aes(x = Pattern, y = percent_chunk, fill = Chunk)) +
+  geom_bar(stat = "identity", position = "fill", width = 0.8) +
+  #facet_wrap(~ Musicianship_Category) +  # Facet by Duration
+  theme_minimal() +
+  labs(
+    title = "Percentage of 'Chunk' Categories per Pattern",
+    x = "Pattern",
+    y = "Percentage of Chunk Responses",
+    fill = "Chunk Category"
+  ) +
+  scale_y_continuous(labels = scales::percent_format()) +  # Format y-axis as percentages
+  scale_fill_brewer(palette = "Set2")
+
+```
+
+The above suggests that participants have indeed selected 1 (which is
+the correct response) for the Chunk.
+
+```{r, Chunk analysis}
+
+# Create contingency table
+cont_table_chunk <- table(data1_chunk_Pattern$Pattern, data1_chunk_Pattern$Chunk)
+
+# Perform chi-square test
+chi_test_1 <- chisq.test(cont_table_chunk)
+
+# Print contingency table
+print("Contingency Table:")
+print(cont_table_chunk)
+
+# Print chi-square test results
+print("Chi-Square Test Results:")
+print(chi_test_1)
+
+```
+
+Catogorising Chunking in Grouped, Ungrouped, and Incorrect a. Grouped
+(1,2) b. Ungrouped (3) c. Incorrect (4,5) d. None (None of these, No
+idea)
+
+```{r Categories Chunk}
+data1_chunk_Groups <- data1_chunk_Pattern %>%
+#  filter(Chunk != "None of these") %>%  # Remove "None of these"
+  mutate(Chunk_Group = case_when(
+    Chunk %in% c(1, 2) ~ "Grouped",
+    Chunk == 3 ~ "Ungrouped",
+    Chunk %in% c(4, 5) ~ "Incorrect",
+    Chunk %in% c('None of these', 'No idea') ~ "None",
+    TRUE ~ NA_character_  # Ensuring all values are accounted for
+  ))
+  #%>%select(-Chunk)
+
+```
+
+Checking if participants sected Gropued over others
+
+```{r binomial Grouped Chunk}
+
+final_results <- data1_chunk_Groups %>%
+  group_by(Pattern) %>%
+  summarize(
+    Total_Observations = n(),
+    Grouped_Count = sum(Chunk_Group == "Grouped", na.rm = TRUE),
+    Proportion_Grouped = Grouped_Count / Total_Observations
+  ) %>%
+  rowwise() %>%
+  mutate(
+    binom_test = list(binom.test(
+      x = Grouped_Count,
+      n = Total_Observations,
+      p = 1/4,
+      alternative = "greater"
+    )),
+    CI_Lower = binom_test$conf.int[1],
+    CI_Upper = binom_test$conf.int[2],
+    P_Value = binom_test$p.value
+  ) %>%
+  select(-binom_test) %>%
+  ungroup()
+
+# Ensure all patterns are included (even those with zero observations)
+all_patterns <- data.frame(Pattern = c("Rupak", "Keherva", "Jhaptal", "Teental"))
+final_results <- all_patterns %>%
+  left_join(final_results, by = "Pattern") %>%
+  arrange(match(Pattern, c("Rupak", "Keherva", "Jhaptal", "Teental")))
+
+print(final_results)
+```
+
+Particpants did select grouped over others.
+
+Plotting responses only
+
+```{r plot chunk categ}
+plot_data <- data1_chunk_Groups %>%
+  mutate(
+    Pattern = recode(Pattern,
+                     "Rupak" = "7-Rupaktal",
+                     "Keherva" = "8-Kehervatal",
+                     "Jhaptal" = "10-Jhaptal",
+                     "Teental" = "16-Teental"),
+    Pattern = factor(Pattern, levels = c("7-Rupaktal", "8-Kehervatal", "10-Jhaptal", "16-Teental"))
+  ) %>%
+  group_by(Pattern, Chunk_Group) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(Pattern) %>%
+  mutate(proportion = n / sum(n))
+
+# Plot
+ggplot(plot_data, aes(x = Pattern, y = proportion, fill = Chunk_Group)) +
+  geom_bar(stat = "identity", position = "stack", color = "black") +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(
+    title = "Proportion of Chunk Groups by Rhythmic Pattern",
+    x = "Rhythm Pattern",
+    y = "Proportion",
+    fill = "Chunk Group"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "right",
+    plot.title = element_text(face = "bold", hjust = 0.5)
+  ) +
+  scale_fill_brewer(palette = "Set2")
+
+```
+
+## Chunking and drpime analysis
+
+New categories of responses: Into Grouped, Ungrouped, Correct and
+Incorrect.
+
+1= M2 Grouped Version 1: Grouped, Correct 
+
+2= M2 Grouped Version 2:Grouped, Correct 
+
+3= M1 Ungrouped: Ungrouped, Correct 
+
+4= Extra beat Grouped: Grouped, Incorrect
+
+5= Extra Beat Ungrouped: Ungrouped, Incorrect 'None of these' 'No idea'
+
+```{r chunk- dprime}
+S<- summarise(group_by(data1_chunk_Groups,Chunk), Mdprime=mean(dprime), SD=sd(dprime))
+print (S)
+
+#Adding Correctness
+data1_chunk_Groups <- data1_chunk_Groups %>%
+  mutate(Chunk_Correctness = case_when(
+    Chunk == 1 ~ "correct",
+    Chunk == 2 ~ "correct",
+    Chunk == 3 ~ "correct",
+    Chunk == 4 ~ "incorrect",
+    Chunk == 5 ~ "incorrect",
+    Chunk == "None of these" ~ "None of these",
+    Chunk == "No idea" ~ "No idea",
+    TRUE ~ NA_character_
+  ))
+head(data1_chunk_Groups)
+
+#Recode Chunking Category
+data1_chunk_Groups <- data1_chunk_Groups %>%
+  mutate(Chunk_Group = case_when(
+    Chunk == 1 ~ "Grouped",
+    Chunk == 2 ~ "Grouped",
+    Chunk == 3 ~ "Ungrouped",
+    Chunk == 4 ~ "Grouped",
+    Chunk == 5 ~ "Ungrouped",
+    Chunk == "None of these" ~ "None of these",
+    Chunk == "No idea" ~ "No idea",
+    TRUE ~ NA_character_
+  ))
+
+
+data1_chunk_Groups_correct <- data1_chunk_Groups %>%
+  filter(!(Chunk_Correctness %in% c("None of these", "No idea")))
+
+chunk_model2 <- lmer(dprime ~ Chunk_Group*Chunk_Correctness+ Pattern+ DST_Score+ (1|ResponseId),  data = data1_chunk_Groups_correct)
+
+# ANOVA table for fixed effects
+print("ANOVA table for fixed effects:")
+anova_results_chunk2 <- anova(chunk_model2)
+print(anova_results_chunk2)
+
+# Check if Chunk_Group effect is significant
+print("Post-hoc comparisons for Chunk_Group:")
+chunk_emm2 <- emmeans(chunk_model2, specs = "Chunk_Group")
+chunk_pairs2 <- pairs(chunk_emm2, adjust = "tukey")
+print(chunk_pairs2)
+
+# For Chunk_Correctness main effect
+print("Post-hoc comparisons for Chunk_Correctness:")
+correct_emm2 <- emmeans(chunk_model2, specs = "Chunk_Correctness")
+correct_pairs2 <- pairs(correct_emm2, adjust = "tukey")
+print(correct_pairs2)
+
+# For two-way interactions
+print("Post-hoc comparisons for Chunk_Group:Chunk_Correctness interaction:")
+group_correct_emm2 <- emmeans(chunk_model2, specs = c("Chunk_Group", "Chunk_Correctness"))
+group_correct_pairs2 <- pairs(group_correct_emm2, adjust = "tukey")
+print(group_correct_pairs2)
+
+
+as.data.frame(group_correct_emm2)
+
+
+
+# Filter to only Grouped categories
+grouped_data <- data1_chunk_Groups_correct %>%
+  filter(Chunk_Group == "Grouped")
+
+grouped_model <- lmer(dprime ~ Pattern*Chunk_Correctness + DST_Score + (1|ResponseId),
+                      data = grouped_data)
+
+print(anova(grouped_model))
+
+
+grouped_emm <- emmeans(grouped_model, specs = c("Pattern", "Chunk_Correctness"))
+grouped_pairs <- pairs(grouped_emm, by = "Pattern", adjust = "tukey")
+print(grouped_pairs)
+
+cat("\nEffect of Correctness within each Pattern:\n")
+correctness_by_pattern <- pairs(emmeans(grouped_model, specs = "Chunk_Correctness", by = "Pattern"))
+print(correctness_by_pattern)
+
+
+
+```
+
+Visualizing Chunking and dprime
+
+```{r chunk vis}
+
+# 1. Summary by Chunk_Group and Chunk_Correctness
+
+summary_group_correct <- data1_chunk_Groups_correct %>%
+  group_by(Chunk_Group, Chunk_Correctness) %>%
+  summarise(
+    mean_dprime = mean(dprime, na.rm = TRUE),
+    sd_dprime = sd(dprime, na.rm = TRUE),
+    n = n(),
+    se_dprime = sd_dprime / sqrt(n),
+    .groups = 'drop'
+  )
+
+print("Summary by Group and Correctness:")
+print(summary_group_correct)
+
+plot1 <- ggplot(summary_group_correct, aes(x = Chunk_Group, y = mean_dprime, fill = Chunk_Correctness)) +
+  geom_bar(stat = "identity", position = "dodge", alpha = 0.8) +
+  geom_errorbar(aes(ymin = mean_dprime - se_dprime, ymax = mean_dprime + se_dprime),
+                position = position_dodge(0.9), width = 0.2) +
+  scale_fill_manual(values = c("correct" = "#2E8B57", "incorrect" = "#DC143C")) +
+  labs(title = "Mean D-prime by Chunk Group and Correctness",
+       x = "Chunk Group",
+       y = "Mean D-prime",
+       fill = "Response Correctness") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, size = 14, face = "bold"))
+
+print(plot1)
+
+# 2. Summary by Pattern and Chunk_Correctness
+summary_pattern_correct <- data1_chunk_Groups_correct %>%
+  group_by(Pattern, Chunk_Correctness) %>%
+  summarise(
+    mean_dprime = mean(dprime, na.rm = TRUE),
+    sd_dprime = sd(dprime, na.rm = TRUE),
+    n = n(),
+    se_dprime = sd_dprime / sqrt(n),
+    .groups = 'drop')
+print(summary_pattern_correct)
+
+plot2 <- ggplot(summary_pattern_correct, aes(x = Pattern, y = mean_dprime, fill = Chunk_Correctness)) +
+  geom_bar(stat = "identity", position = "dodge", alpha = 0.8) +
+  geom_errorbar(aes(ymin = mean_dprime - se_dprime, ymax = mean_dprime + se_dprime),
+                position = position_dodge(0.9), width = 0.2) +
+  scale_fill_manual(values = c("correct" = "#2E8B57", "incorrect" = "#DC143C")) +
+  labs(title = "Mean D-prime Across Patterns by Correctness",
+       x = "Pattern",
+       y = "Mean D-prime",
+       fill = "Response Correctness") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, size = 14, face = "bold"))
+
+print(plot2)
+
+
+# 3. Three-way interaction: Pattern x Chunk_Group x Chunk_Correctness
+summary_three_way <- data1_chunk_Groups_correct %>%
+  group_by(Pattern, Chunk_Group, Chunk_Correctness) %>%
+  summarise(
+    mean_dprime = mean(dprime, na.rm = TRUE),
+    sd_dprime = sd(dprime, na.rm = TRUE),
+    n = n(),
+    se_dprime = sd_dprime / sqrt(n),
+    .groups = 'drop'
+  )
+print(summary_three_way)
+
+plot3 <- ggplot(summary_three_way, aes(x = Chunk_Group, y = mean_dprime, fill = Chunk_Correctness)) +
+  geom_bar(stat = "identity", position = "dodge", alpha = 0.8) +
+  geom_errorbar(aes(ymin = mean_dprime - se_dprime, ymax = mean_dprime + se_dprime),
+                position = position_dodge(0.9), width = 0.2) +
+  facet_wrap(~ Pattern, scales = "free_y") +
+  scale_fill_manual(values = c("correct" = "#2E8B57", "incorrect" = "#DC143C")) +
+  labs(title = "D-prime by Pattern, Chunk Group, and Correctness",
+       x = "Chunk Group",
+       y = "Mean D-prime",
+       fill = "Response Correctness") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+        strip.text = element_text(face = "bold"))
+
+print(plot3)
+
+#All patterns for Grouped categories only
+grouped_summary <- grouped_data %>%
+ group_by(Pattern, Chunk_Correctness) %>%
+ summarise(
+   mean_dprime = mean(dprime, na.rm = TRUE),
+   sd_dprime = sd(dprime, na.rm = TRUE),
+   n = n(),
+   se_dprime = sd_dprime / sqrt(n),
+   .groups = 'drop'
+ ) %>%
+ mutate(Pattern = factor(Pattern, levels = c("Rupak", "Keherva", "Jhaptal", "Teental"),
+                         labels = c("7-Rupaktal", "8-Kehervatal", "10-Jhaptal", "16-Teental")))
+
+grouped_plot <- ggplot(grouped_summary, aes(x = Pattern, y = mean_dprime, fill = Chunk_Correctness)) +
+ geom_bar(stat = "identity", position = "dodge", alpha = 0.85, width = 0.7) +
+ geom_errorbar(aes(ymin = mean_dprime - se_dprime, ymax = mean_dprime + se_dprime),
+               position = position_dodge(0.7), width = 0.25, linewidth = 0.5) +
+ scale_fill_manual(values = c("correct" = "#2E8B57", "incorrect" = "#DC143C"),
+                   name = "Response\nCorrectness") +
+ labs(title = "D-prime for Grouped Responses by Pattern and Correctness",
+      x = "Pattern",
+      y = "Mean D-prime") +
+ theme_minimal() +
+ theme(
+   plot.title = element_text(hjust = 0.5, size = 16, face = "bold", margin = margin(b = 20)),
+   axis.title = element_text(size = 12, face = "bold"),
+   axis.text = element_text(size = 11),
+   legend.title = element_text(size = 11, face = "bold"),
+   legend.text = element_text(size = 10),
+   panel.grid.minor = element_blank(),
+   plot.margin = margin(20, 20, 20, 20)
+ )
+
+print(grouped_plot)
+
+```
+
+Finalising plots with significance
+
+```{r fig sig}
+# Plot 1: By Chunk Group and Correctness
+plot1 <- ggplot(summary_group_correct, aes(x = Chunk_Group, y = mean_dprime, fill = Chunk_Correctness)) +
+  geom_bar(stat = "identity", position = "dodge", alpha = 0.8) +
+  geom_errorbar(aes(ymin = mean_dprime - se_dprime, ymax = mean_dprime + se_dprime),
+                position = position_dodge(0.9), width = 0.2) +
+  scale_fill_manual(values = c("correct" = "#2E8B57", "incorrect" = "#DC143C")) +
+  labs(
+    x = "Chunk Group",
+    y = "Mean D-prime",
+    fill = "Response Correctness"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+    legend.position = "top",
+    legend.direction = "horizontal",
+    legend.box.just = "center",
+    axis.line = element_line(color = "black", linewidth = 0.5)
+  ) +
+  geom_signif(
+    xmin = 0.75, xmax = 1.25,
+    y_position = max(summary_group_correct$mean_dprime + summary_group_correct$se_dprime) * 1.07,
+    annotation = "*",
+    tip_length = 0.01
+  )
+
+print(plot1)
+
+# Plot 2: Grouped by Pattern and Correctness
+max_y <- max(grouped_summary$mean_dprime + grouped_summary$se_dprime)
+
+grouped_plot <- ggplot(grouped_summary, aes(x = Pattern, y = mean_dprime, fill = Chunk_Correctness)) +
+  geom_bar(stat = "identity", position = "dodge", alpha = 0.85, width = 0.7) +
+  geom_errorbar(aes(ymin = mean_dprime - se_dprime, ymax = mean_dprime + se_dprime),
+                position = position_dodge(0.7), width = 0.25, linewidth = 0.5) +
+  scale_fill_manual(values = c("correct" = "#2E8B57", "incorrect" = "#DC143C"),
+                    name = "Response Correctness") +
+  labs(
+    x = "Pattern",
+    y = "Mean D-prime"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold", margin = margin(b = 20)),
+    axis.title = element_text(size = 12, face = "bold"),
+    axis.text = element_text(size = 11),
+    legend.title = element_text(size = 11, face = "bold"),
+    legend.text = element_text(size = 10),
+    legend.position = "top",
+    legend.direction = "horizontal",
+    legend.box.just = "center",
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(color = "black", linewidth = 0.5),
+    plot.margin = margin(20, 20, 20, 20)
+  ) +
+  # Significance brackets
+  annotate("segment", x = 0.75, xend = 0.75, y = max_y * 1.01, yend = max_y * 1.04) +
+  annotate("segment", x = 0.75, xend = 1.25, y = max_y * 1.04, yend = max_y * 1.04) +
+  annotate("segment", x = 1.25, xend = 1.25, y = max_y * 1.01, yend = max_y * 1.04) +
+  annotate("text", x = 1, y = max_y * 1.06, label = "**", size = 6) +
+
+  annotate("segment", x = 1.75, xend = 1.75, y = max_y * 1.01, yend = max_y * 1.04) +
+  annotate("segment", x = 1.75, xend = 2.25, y = max_y * 1.04, yend = max_y * 1.04) +
+  annotate("segment", x = 2.25, xend = 2.25, y = max_y * 1.01, yend = max_y * 1.04) +
+  annotate("text", x = 2, y = max_y * 1.06, label = "*", size = 6)
+
+print(grouped_plot)
+
+# Save both plots
+#ggsave("chunk1.jpg", plot = plot1, dpi = 300, width = 6, height = 5, units = "in")
+#ggsave("chunk2.jpg", plot = grouped_plot, dpi = 300, width = 6, height = 5, units = "in")
+
+```
+
+
+
+## Step 6: Open ended question
+
+Looking at some patterns within the open question participants were
+asked to type in 'Strategies' after the discrimination task and before
+the Chunk they chose for each pattern. This is not included in the paper.
+
+Starting with the analysis of the open ended question itself
+
+```{r Strategies1}
+#1. Preprocessing. Using data1_long because 1 strategy per participant is needed at this stage
+strategies_data <- data1_long %>%
+  select(ResponseId, Strategies, RupaktalChunk, KehervaChunk, JhaptalChunk, 
+         TeentalChunk, Musical_Training, Musicianship_Category)%>%
+  distinct() 
+
+clean_strat_data <- strategies_data %>%
+  mutate(Strategies = str_to_lower(Strategies),  # Convert to lowercase
+         Strategies = str_replace_all(Strategies, "[[:punct:]]", "")) %>%  # Remove punctuation
+  unnest_tokens(word, Strategies) %>%  # Tokenize words
+  anti_join(stop_words, by = "word") 
+
+#print(clean_strat_data)
+
+# Word Frequency Analysis
+word_counts <- clean_strat_data %>%
+  count(word, sort = TRUE) 
+print(word_counts)
+
+# Word Cloud
+ggplot(word_counts, aes(label = word, size = n, color = n)) +
+  geom_text_wordcloud(eccentricity = 1, rotation = 0) +
+  scale_size_area(max_size = 15) +  # Adjust max size of words
+  scale_color_gradient(low = "blue", high = "red") +  # Color scale
+  theme_minimal() +
+  labs(title = "Most Frequent Words in Strategies Column")
+```
+
+Now creating categories for the words:
+
+```{r Strategies}
+# strategy categories based on word frequencies
+strategy_categories <- list(
+  # Counting and beat-related
+  counting = c("beats", "beat", "counting", "counted", "time", "tempo","count","track"),
+  
+  # Listening, feeling, some sort of internalising
+  Feel = c("listen", "listening", "hear", "heard", "audio", "note","low", "feel", "feeling", "bass", "strong", "realizing", "instrument","sense","jiggles","vague","listened", "pitch", "played", "hit"),
+  
+  # Pattern recognition related
+  pattern_recognition = c("pattern", "patterns", "Pattern", "groupings", "sequence", "repetition", "sound", "sounds", "division", "matched","match","timbres","distinguish","identify","compare","recurring","recognize","repeats", "spot", "assign", "notes"),
+  
+  # Rhythm and metre related
+  rhythm_metre = c("rhythm","rhythms","rythm","rhytm","rythmic", "rhythmic","rhythym","rythem","drums", "drum", "metre","meter","signature","signatures","pulse","strong","weak","strongweak","stronger","weaker","theory","attacks","releases","interval", "downbeat"),
+  
+  # Memory and attention related
+  memory_attention = c("memory","memorize", "memorising","memorized","memorizacion","focus", "focused", "attention","attentively", "focusing", "recognition", "forgetting","representations","identifying","remember","remembering","noticing","noticed","reciting","learn","learned","repeating","detect"),
+  
+  # Movement, Gesture and visualization related
+  gesture= c("hands", "finger","handfingers", "tilting", "head", "mimic", "directions","visualisation","visualising","tapping","tap","kick","shaking","shake","movement","shapes", "fingers")
+
+)
+
+# Function to categorize words into strategy types
+categorize_strategy <- function(word, categories) {
+  for (cat_name in names(categories)) {
+    if (word %in% categories[[cat_name]]) {
+      return(cat_name)
+    }
+  }
+  return("other")
+}
+
+# Apply categorization to the cleaned data
+categorized_strategies <- clean_strat_data %>%
+  mutate(strategy_category = sapply(word, 
+                                   function(w) categorize_strategy(w, strategy_categories)))
+
+# Count strategies by category
+strategy_category_counts <- categorized_strategies %>%
+  count(strategy_category) %>%
+  arrange(desc(n))
+
+# Visualize strategy categories
+ggplot(strategy_category_counts, aes(x = reorder(strategy_category, n), y = n, fill = strategy_category)) +
+  geom_col() +
+  coord_flip() +
+  labs(title = "Strategy Categories Used by Participants",
+       x = "Strategy Category", 
+       y = "Frequency") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+# Look at the most common words in the "other" category to see what we missed
+other_words <- categorized_strategies %>%
+  filter(strategy_category == "other") %>%
+  count(word, sort = TRUE) %>%
+  head(20)
+
+print("Most common uncategorized words:")
+print(other_words)
+
+```
+
+Will probably discard the 'other' category as some words make no sense
+Analysing these categories in relation to Chunking and
+Musicianship_Category. Unsure about what statistical test to use
+
+```{r Strategies3}
+
+# Prepare the data
+chunk_vars <- intersect(
+  c("RupaktalChunk", "KehervaChunk", "JhaptalChunk", "TeentalChunk"),
+  names(categorized_strategies)
+)
+
+# Convert chunks to factors (no need for brackets unless checks are necessary)
+for (var in chunk_vars) {
+  categorized_strategies[[var]] <- factor(
+    categorized_strategies[[var]],
+    levels = c("1", "2", "3", "4", "5", "None of these"),
+    ordered = TRUE
+  )
+}
+
+# Prepare data for analysis
+chunk_strategy_data <- categorized_strategies %>%
+  filter(strategy_category != "other") %>%
+  pivot_longer(
+    cols = all_of(chunk_vars),
+    names_to = "Pattern", 
+    values_to = "Chunk_Response"
+  ) %>%
+  mutate(Pattern = str_remove(Pattern, "Chunk")) %>%
+  filter(!is.na(Chunk_Response))
+
+# Count strategy usage by chunk response
+strategy_response_counts <- chunk_strategy_data %>%
+  count(Pattern, strategy_category, Chunk_Response) %>%
+  ungroup()
+
+# Graph 1: Visualize raw counts of responses by strategy
+ggplot(
+  strategy_response_counts,
+  aes(x = reorder(strategy_category, n, sum), y = n, fill = Chunk_Response)
+) +
+  geom_col() +
+  labs(
+    title = "Count of Responses by Strategy and Pattern",
+    x = "Strategy Category",
+    y = "Number of Responses"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  facet_wrap(~Pattern)
+
+# Graph 2: Heatmap with counts
+ggplot(strategy_response_counts, 
+       aes(x = Chunk_Response, y = strategy_category, fill = n)) +
+  geom_tile() +
+  facet_wrap(~Pattern) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  labs(
+    title = "Count of Chunk Responses by Strategy",
+    x = "Chunk Response",
+    y = "Strategy Category",
+    fill = "Count"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Find primary strategy for each respondent
+primary_strategy_by_respondent <- categorized_strategies %>%
+  filter(strategy_category != "other") %>%
+  count(ResponseId, strategy_category) %>%
+  group_by(ResponseId) %>%
+  slice_max(order_by = n, n = 1) %>%
+  ungroup() %>%
+  select(ResponseId, primary_strategy = strategy_category)
+
+# Graph 3: Analyze primary strategy by musicianship category
+  musicianship_data <- categorized_strategies %>%
+    select(ResponseId, Musicianship_Category) %>%
+    distinct()
+  
+  strategy_by_musician <- primary_strategy_by_respondent %>%
+    left_join(musicianship_data, by = "ResponseId") %>%
+    filter(!is.na(Musicianship_Category)) %>%
+    count(Musicianship_Category, primary_strategy) 
+  
+  ggplot(strategy_by_musician, 
+         aes(x = Musicianship_Category, y = n, fill = primary_strategy)) +
+    geom_col(position = "dodge") +
+    labs(
+      title = "Count of Primary Strategy by Musicianship Category",
+      x = "Musicianship Category",
+      y = "Count",
+      fill = "Primary Strategy"
+    ) +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```

@@ -8,13 +8,13 @@ This repository contains the stimuli, dataset and R analysis code used to invest
 
 ## Stimuli
 
-The `Audio Stimuli` folder includes all rhythmic cycle audio files used in the study. It contains: *Reference (N)* and *N+1* and *N-1* versions for each of the four rhythmic cycles in 4 different durations.
+The `Audio Stimuli` folder includes all rhythmic cycle audio files used in the study. It contains: *Reference (N)* and *N+1* and *N-1* versions for each of the four rhythmic cycles (7 beat Rupaktal, 8 beat Kehervatal, 10 beat Jhaptal, 16 beat Teental) in 4 different cycle durations (3.5 sec, 4sec, 5sec, 8sec)
 
 ---
 
 ## Datasets
 
-IndianRhythmDiscrimination.csv contains the dataset (outlier removed) used in the study. It contains participant musical training, participant's raw responses (i.e. same or different on the Rhythmic Discrimination task), Participant responses on Chunk selection, each participant's DST Scores, and open ended responses on what Strategies they used for the rhythm discrimination task. For the full details of the task please see the article or contact the researcher.
+IndianRhythmDiscrimination.csv contains the dataset (outlier removed) used in the study. It contains participant musical training, participant's raw responses (i.e. same or different on the Rhythmic Discrimination of the stimuli above), Participant responses on Chunk selection, each participant's DST Scores, and open ended responses on what Strategies they used for the rhythm discrimination task. For the full details of the task please see the article or contact the researcher.
 
 ---
 

@@ -2,7 +2,7 @@
 ## Overview
 This repository contains the stimuli, dataset and R analysis code used to investigate the interaction between rhythm cycle length, duration and structure for Hindustani/North Indian Classical Rhythms; focusing on the role of working memory capacity, rhythmic structure, and cognitive strategies.
 
-> The paper associated with this project will be added here once it has completed the peer review process.
+> If you use this repository in any form, please cite the latest version of this paper: Ahmad, N., Clayton, M., & Eerola, T. (2025). Influence of Memory and Chunking Strategies in the Perception of Culturally Unfamiliar Long Rhythmic Cycles. Routledge Open Research, 4, 9. [versio 1]. https://doi.org/10.12688/routledgeopenres.19547.2
 
 ---
 
